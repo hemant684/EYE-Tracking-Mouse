@@ -1,0 +1,226 @@
+import tkinter as tk
+from tkinter import ttk
+import cv2
+import dlib
+import numpy as np
+import pyautogui as pag
+from PIL import Image, ImageTk
+import threading
+import time
+import os
+from collections import deque
+
+class EnhancedEyeTrackerGUI:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Enhanced Eye Mouse Tracker")
+        
+        # Disable pyautogui's failsafe
+        pag.FAILSAFE = False
+        
+        # Initialize tracking variables
+        self.is_tracking = False
+        self.is_calibrated = False
+        self.screen_w, self.screen_h = pag.size()
+        
+        # Load Dlib's face detector and predictor
+        self.detector = dlib.get_frontal_face_detector()
+        predictor_path = "shape_predictor_68_face_landmarks.dat"
+        if not os.path.exists(predictor_path):
+            raise FileNotFoundError("Missing shape_predictor_68_face_landmarks.dat file!")
+        self.predictor = dlib.shape_predictor(predictor_path)
+        
+        # Blink detection parameters
+        self.blink_start_time = None
+        self.blink_threshold = 0.15
+        self.click_duration = 0.15
+        
+        # Smoothing parameters
+        self.smoothing_window = 10
+        self.position_history = deque(maxlen=self.smoothing_window)
+        self.last_valid_position = None
+        
+        # Kalman filter setup
+        self.kalman = cv2.KalmanFilter(4, 2)
+        self.kalman.measurementMatrix = np.array([[1, 0, 0, 0],
+                                               [0, 1, 0, 0]], np.float32)
+        self.kalman.transitionMatrix = np.array([[1, 0, 1, 0],
+                                              [0, 1, 0, 1],
+                                              [0, 0, 1, 0],
+                                              [0, 0, 0, 1]], np.float32)
+        self.kalman.processNoiseCov = np.array([[1, 0, 0, 0],
+                                             [0, 1, 0, 0],
+                                             [0, 0, 1, 0],
+                                             [0, 0, 0, 1]], np.float32) * 0.03
+        
+        self.setup_gui()
+        
+    def setup_gui(self):
+        # Main frame
+        self.main_frame = ttk.Frame(self.root, padding="10")
+        self.main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        
+        # Video frame
+        self.video_frame = ttk.Frame(self.main_frame)
+        self.video_frame.grid(row=0, column=0, columnspan=2, pady=5)
+        self.video_label = ttk.Label(self.video_frame)
+        self.video_label.grid(row=0, column=0)
+        
+        # Controls frame
+        self.controls_frame = ttk.LabelFrame(self.main_frame, text="Controls", padding="5")
+        self.controls_frame.grid(row=1, column=0, columnspan=2, pady=5, sticky=(tk.W, tk.E))
+        
+        # Buttons
+        self.toggle_button = ttk.Button(self.controls_frame, text="Start Tracking", command=self.toggle_tracking)
+        self.toggle_button.grid(row=0, column=0, padx=5)
+        
+        # Sliders
+        self.blink_label = ttk.Label(self.controls_frame, text="Blink Threshold:")
+        self.blink_label.grid(row=0, column=1, padx=5)
+        self.blink_slider = ttk.Scale(
+            self.controls_frame,
+            from_=0.05,
+            to=0.3,
+            orient=tk.HORIZONTAL,
+            value=0.15,
+            command=self.update_blink_threshold
+        )
+        self.blink_slider.grid(row=0, column=2, padx=5)
+        
+        # Status
+        self.status_var = tk.StringVar(value="Ready")
+        self.status_bar = ttk.Label(self.main_frame, textvariable=self.status_var, relief=tk.SUNKEN)
+        self.status_bar.grid(row=2, column=0, columnspan=2, sticky=(tk.W, tk.E))
+        
+        # Initialize camera
+        self.cap = cv2.VideoCapture(0)
+        
+    def update_blink_threshold(self, value):
+        self.blink_threshold = float(value)
+        
+    def eye_aspect_ratio(self, eye_points):
+        """Calculate the Eye Aspect Ratio (EAR) for blink detection."""
+        p2_p6 = abs(eye_points[1].y - eye_points[5].y)
+        p3_p5 = abs(eye_points[2].y - eye_points[4].y)
+        p1_p4 = abs(eye_points[0].x - eye_points[3].x)
+        return (p2_p6 + p3_p5) / (2.0 * p1_p4)
+        
+    def smooth_position(self, new_pos):
+        """Apply multiple smoothing techniques to the cursor position."""
+        if self.last_valid_position is None:
+            self.last_valid_position = new_pos
+            return new_pos
+            
+        # Distance threshold for sudden jumps
+        max_movement = 100
+        if (abs(new_pos[0] - self.last_valid_position[0]) > max_movement or
+            abs(new_pos[1] - self.last_valid_position[1]) > max_movement):
+            return self.last_valid_position
+            
+        # Apply Kalman filter
+        measurement = np.array([[np.float32(new_pos[0])], [np.float32(new_pos[1])]])
+        self.kalman.correct(measurement)
+        prediction = self.kalman.predict()
+        
+        # Moving average smoothing
+        self.position_history.append(new_pos)
+        if len(self.position_history) >= self.smoothing_window:
+            smoothed_x = int(sum(p[0] for p in self.position_history) / len(self.position_history))
+            smoothed_y = int(sum(p[1] for p in self.position_history) / len(self.position_history))
+            
+            # Weighted average between Kalman and moving average
+            final_x = int(0.6 * prediction[0] + 0.4 * smoothed_x)
+            final_y = int(0.6 * prediction[1] + 0.4 * smoothed_y)
+            
+            self.last_valid_position = (final_x, final_y)
+            return self.last_valid_position
+            
+        return new_pos
+        
+    def toggle_tracking(self):
+        if not self.is_tracking:
+            self.is_tracking = True
+            self.toggle_button.configure(text="Stop Tracking")
+            self.status_var.set("Tracking active")
+            threading.Thread(target=self.tracking_loop, daemon=True).start()
+        else:
+            self.is_tracking = False
+            self.toggle_button.configure(text="Start Tracking")
+            self.status_var.set("Tracking stopped")
+            
+    def tracking_loop(self):
+        while self.is_tracking:
+            ret, frame = self.cap.read()
+            if not ret:
+                continue
+                
+            frame = cv2.flip(frame, 1)
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            faces = self.detector(gray)
+            
+            for face in faces:
+                landmarks = self.predictor(gray, face)
+                
+                # Get eye landmarks
+                left_eye_points = [landmarks.part(i) for i in range(36, 42)]
+                right_eye_points = [landmarks.part(i) for i in range(42, 48)]
+                
+                # Calculate eye centers
+                left_eye_center = (
+                    sum(p.x for p in left_eye_points) // 6,
+                    sum(p.y for p in left_eye_points) // 6
+                )
+                right_eye_center = (
+                    sum(p.x for p in right_eye_points) // 6,
+                    sum(p.y for p in right_eye_points) // 6
+                )
+                
+                # Map eye position to screen coordinates
+                screenx = int(self.screen_w / frame.shape[1] * left_eye_center[0])
+                screeny = int(self.screen_h / frame.shape[0] * left_eye_center[1])
+                
+                # Apply smoothing
+                smooth_pos = self.smooth_position((screenx, screeny))
+                pag.moveTo(smooth_pos[0], smooth_pos[1], duration=0.1, _pause=False)
+                
+                # Visualize tracking
+                cv2.circle(frame, left_eye_center, 3, (0, 255, 0), -1)
+                cv2.circle(frame, right_eye_center, 3, (0, 255, 0), -1)
+                
+                # Blink detection
+                left_ear = self.eye_aspect_ratio(left_eye_points)
+                right_ear = self.eye_aspect_ratio(right_eye_points)
+                
+                if left_ear < self.blink_threshold and right_ear < self.blink_threshold:
+                    if self.blink_start_time is None:
+                        self.blink_start_time = time.time()
+                    elif time.time() - self.blink_start_time >= self.click_duration:
+                        pag.click()
+                        self.blink_start_time = None
+                        self.status_var.set("Click!")
+                else:
+                    self.blink_start_time = None
+            
+            # Update video feed
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            frame_rgb = cv2.resize(frame_rgb, (640, 480))
+            img = Image.fromarray(frame_rgb)
+            imgtk = ImageTk.PhotoImage(image=img)
+            self.video_label.imgtk = imgtk
+            self.video_label.configure(image=imgtk)
+            
+        self.video_label.imgtk = None
+        
+    def cleanup(self):
+        self.is_tracking = False
+        if self.cap.isOpened():
+            self.cap.release()
+
+def main():
+    root = tk.Tk()
+    app = EnhancedEyeTrackerGUI(root)
+    root.protocol("WM_DELETE_WINDOW", lambda: (app.cleanup(), root.destroy()))
+    root.mainloop()
+
+if __name__ == "__main__":
+    main() 

@@ -1,0 +1,1 @@
+([('eye_tracker', '/Users/kavya/eye/dist/eye_tracker', 'EXECUTABLE')],)

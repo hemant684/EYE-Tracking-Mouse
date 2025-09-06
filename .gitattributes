@@ -1,0 +1,4 @@
+shape_predictor_68_face_landmarks.dat filter=lfs diff=lfs merge=lfs -text
+dist/eye_tracker filter=lfs diff=lfs merge=lfs -text
+build/eye_tracker/eye_tracker.pkg filter=lfs diff=lfs merge=lfs -text
+dist/eye_tracker.app/Contents/MacOS/eye_tracker filter=lfs diff=lfs merge=lfs -text
