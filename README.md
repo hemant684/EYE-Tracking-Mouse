@@ -20,7 +20,7 @@ Prerequisites
 Installation
 1. Clone the repository:
 ```bash
-git clone https://github.com/02falgun/Eye_Tracking_Mouse.git
+git clone [https://github.com/hemant684/EYE-Tracking-Mouse.git](https://github.com/hemant684/EYE-Tracking-Mouse)
 cd Eye_Tracking_Mouse
 ```
 
